@@ -37,7 +37,9 @@ import org.codehaus.plexus.compiler.AbstractCompiler;
 import org.codehaus.plexus.compiler.CompilerConfiguration;
 import org.codehaus.plexus.compiler.CompilerError;
 import org.codehaus.plexus.compiler.CompilerException;
+import org.codehaus.plexus.compiler.CompilerMessage;
 import org.codehaus.plexus.compiler.CompilerOutputStyle;
+import org.codehaus.plexus.compiler.CompilerResult;
 import org.codehaus.plexus.compiler.util.scan.InclusionScanException;
 import org.codehaus.plexus.compiler.util.scan.SourceInclusionScanner;
 import org.codehaus.plexus.compiler.util.scan.StaleSourceScanner;
@@ -213,15 +215,15 @@ public class GroovyEclipseCompiler extends AbstractCompiler {
     }
 
     @SuppressWarnings("rawtypes")
-    public List compile(CompilerConfiguration config) throws CompilerException {
+    public CompilerResult performCompile(CompilerConfiguration config) throws CompilerException {
 
         String[] args = createCommandLine(config);
         if (args.length == 0) {
             getLogger().info("Nothing to compile - all classes are up to date");
-            return Collections.emptyList();
+            return new CompilerResult(true, Collections.<CompilerMessage>emptyList());
         }
 
-        List<CompilerError> messages;
+        CompilerResult result;
         if (config.isFork()) {
             String executable = config.getExecutable();
 
@@ -235,16 +237,16 @@ public class GroovyEclipseCompiler extends AbstractCompiler {
             }
 
             String groovyEclipseLocation = getGroovyEclipseBatchLocation();
-            messages = compileOutOfProcess(config, executable, groovyEclipseLocation, args);
+            result = compileOutOfProcess(config, executable, groovyEclipseLocation, args);
         } else {
             Progress progress = new Progress();
             Main main = new Main(new PrintWriter(System.out), new PrintWriter(System.err), false/* systemExit */,
                     null/* options */, progress);
-            boolean result = main.compile(args);
+            boolean hasResult = main.compile(args);
 
-            messages = formatResult(main, result);
+            result = formatResult(main, hasResult);
         }
-        return messages;
+        return result;
     }
 
     private File[] recalculateStaleFiles(CompilerConfiguration config) throws CompilerException {
@@ -266,15 +268,14 @@ public class GroovyEclipseCompiler extends AbstractCompiler {
         return null != key && String.class.isInstance(key) && ((String) key).startsWith("-");
     }
 
-    private List<CompilerError> formatResult(Main main, boolean result) {
-        if (result) {
-            return Collections.EMPTY_LIST;
-        } else {
-            String error = main.globalErrorsCount == 1 ? "error" : "errors";
-            String warning = main.globalWarningsCount == 1 ? "warning" : "warnings";
-            return Collections.singletonList(new CompilerError("Found " + main.globalErrorsCount + " " + error + " and "
-                    + main.globalWarningsCount + " " + warning + ".", true));
-        }
+    private CompilerResult formatResult(Main main, boolean hasResult) {
+        CompilerResult result = new CompilerResult();
+        result.setSuccess(hasResult);
+        String error = main.globalErrorsCount == 1 ? "error" : "errors";
+        String warning = main.globalWarningsCount == 1 ? "warning" : "warnings";
+        result.setCompilerMessages(Collections.singletonList(new CompilerMessage("Found " + main.globalErrorsCount + " " + error + " and "
+                + main.globalWarningsCount + " " + warning + ".", true)));
+        return result;
     }
 
     private List<String> composeSourceFiles(File[] sourceFiles) {
@@ -488,7 +489,7 @@ public class GroovyEclipseCompiler extends AbstractCompiler {
      * @return List of CompilerError objects with the errors encountered.
      * @throws CompilerException
      */
-    private List<CompilerError> compileOutOfProcess(CompilerConfiguration config, String executable, String groovyEclipseLocation,
+    private CompilerResult compileOutOfProcess(CompilerConfiguration config, String executable, String groovyEclipseLocation,
             String[] args) throws CompilerException {
 
         Commandline cli = new Commandline();
@@ -524,7 +525,7 @@ public class GroovyEclipseCompiler extends AbstractCompiler {
         CommandLineUtils.StringStreamConsumer err = new CommandLineUtils.StringStreamConsumer();
 
         int returnCode;
-        List<CompilerError> messages;
+        List<CompilerMessage> messages;
 
         if ((getLogger() != null) && getLogger().isDebugEnabled()) {
             File commandLineFile = new File(config.getOutputLocation(), "greclipse."
@@ -552,15 +553,17 @@ public class GroovyEclipseCompiler extends AbstractCompiler {
             throw new CompilerException("Error while executing the external compiler.", e);
         }
 
+        boolean isSuccess = true;
         if ((returnCode != 0) && messages.isEmpty()) {
             if (err.getOutput().length() == 0) {
                 throw new CompilerException("Unknown error trying to execute the external compiler: " + EOL + cli.toString());
             } else {
-                messages.add(new CompilerError("Failure executing groovy-eclipse compiler:" + EOL + err.getOutput(), true));
+                isSuccess = false;
+                messages.add(new CompilerMessage("Failure executing groovy-eclipse compiler:" + EOL + err.getOutput(), true));
             }
         }
 
-        return messages;
+        return new CompilerResult(isSuccess, messages);
     }
 
     /**
@@ -573,8 +576,8 @@ public class GroovyEclipseCompiler extends AbstractCompiler {
      * @return List of CompilerError objects
      * @throws IOException
      */
-    List<CompilerError> parseModernStream(int exitCode, BufferedReader input) throws IOException {
-        List<CompilerError> errors = new ArrayList<CompilerError>();
+    List<CompilerMessage> parseModernStream(int exitCode, BufferedReader input) throws IOException {
+        List<CompilerMessage> errors = new ArrayList<CompilerMessage>();
 
         String line;
 
@@ -593,7 +596,7 @@ public class GroovyEclipseCompiler extends AbstractCompiler {
                 }
 
                 if ((buffer.length() == 0) && line.startsWith("error: ")) {
-                    errors.add(new CompilerError(line, true));
+                    errors.add(new CompilerMessage(line, true));
                 } else if ((buffer.length() == 0) && isNote(line)) {
                     // skip, JDK 1.5 telling us deprecated APIs are used but
                     // -Xlint:deprecation isn't set
@@ -627,7 +630,7 @@ public class GroovyEclipseCompiler extends AbstractCompiler {
      *            output line from the compiler
      * @return the CompilerError object
      */
-    static CompilerError parseModernError(int exitCode, String error) {
+    static CompilerMessage parseModernError(int exitCode, String error) {
         StringTokenizer tokens = new StringTokenizer(error, ":");
 
         boolean isError = exitCode != 0;
@@ -733,13 +736,13 @@ public class GroovyEclipseCompiler extends AbstractCompiler {
                 endcolumn = context.length();
             }
 
-            return new CompilerError(file, isError, line, startcolumn, line, endcolumn, message.trim());
+            return new CompilerMessage(file, isError, line, startcolumn, line, endcolumn, message.trim());
         } catch (NoSuchElementException e) {
-            return new CompilerError("no more tokens - could not parse error message: " + error, isError);
+            return new CompilerMessage("no more tokens - could not parse error message: " + error, isError);
         } catch (NumberFormatException e) {
-            return new CompilerError("could not parse error message: " + error, isError);
+            return new CompilerMessage("could not parse error message: " + error, isError);
         } catch (Exception e) {
-            return new CompilerError("could not parse error message: " + error, isError);
+            return new CompilerMessage("could not parse error message: " + error, isError);
         }
     }
 
