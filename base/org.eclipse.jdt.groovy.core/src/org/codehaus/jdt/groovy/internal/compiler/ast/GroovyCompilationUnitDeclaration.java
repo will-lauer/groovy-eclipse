@@ -103,6 +103,7 @@ import org.eclipse.jdt.internal.compiler.lookup.BlockScope;
 import org.eclipse.jdt.internal.compiler.lookup.CompilationUnitScope;
 import org.eclipse.jdt.internal.compiler.lookup.LocalTypeBinding;
 import org.eclipse.jdt.internal.compiler.lookup.LookupEnvironment;
+import org.eclipse.jdt.internal.compiler.lookup.MethodScope;
 import org.eclipse.jdt.internal.compiler.lookup.SourceTypeBinding;
 import org.eclipse.jdt.internal.compiler.lookup.TypeIds;
 import org.eclipse.jdt.internal.compiler.problem.AbortCompilation;
@@ -714,7 +715,7 @@ public class GroovyCompilationUnitDeclaration extends CompilationUnitDeclaration
 				}
 			}
 
-			configureSuperClass(typeDeclaration, classNode.getSuperClass(), isEnum);
+			configureSuperClass(typeDeclaration, classNode.getSuperClass(), isEnum, Traits.isTrait(classNode));
 			configureSuperInterfaces(typeDeclaration, classNode);
 			typeDeclaration.methods = createMethodAndConstructorDeclarations(typeDeclaration, classNode, isEnum, compilationResult);
 			typeDeclaration.fields = createFieldDeclarations(classNode, isEnum);
@@ -780,7 +781,7 @@ public class GroovyCompilationUnitDeclaration extends CompilationUnitDeclaration
 					inner.enclosingMethod = enclosingMethodJDT;
 
 					// just a dummy scope to be filled in for real later. needed for structure requesting
-					enclosingMethodJDT.scope = new GroovyMethodScope(outerTypeDeclaration.scope, enclosingMethodJDT,
+					enclosingMethodJDT.scope = new MethodScope(outerTypeDeclaration.scope, enclosingMethodJDT,
 							enclosingMethodJDT.isStatic());
 					if (inner.enclosingMethod.statements == null || inner.enclosingMethod.statements.length == 0) {
 						inner.enclosingMethod.statements = new Statement[] { inner.allocation };
@@ -876,8 +877,12 @@ public class GroovyCompilationUnitDeclaration extends CompilationUnitDeclaration
 	private FieldDeclaration[] createFieldDeclarations(ClassNode classNode, boolean isEnum) {
 		List<FieldDeclaration> fieldDeclarations = new ArrayList<FieldDeclaration>();
 		List<FieldNode> fieldNodes = classNode.getFields();
+		boolean isTrait = Traits.isTrait(classNode);
 		if (fieldNodes != null) {
 			for (FieldNode fieldNode : fieldNodes) {
+				if (isTrait && !fieldNode.isPublic()) {
+					continue;
+				}
 				if (isEnum && (fieldNode.getName().equals("MAX_VALUE") || fieldNode.getName().equals("MIN_VALUE"))) {
 					continue;
 				}
@@ -1065,7 +1070,12 @@ public class GroovyCompilationUnitDeclaration extends CompilationUnitDeclaration
 			List<AbstractMethodDeclaration> accumulatedDeclarations) {
 		List<MethodNode> methods = classNode.getMethods();
 
+		boolean isTrait = Traits.isTrait(classNode);
+
 		for (MethodNode methodNode : methods) {
+			if (isTrait && (!methodNode.isPublic() || methodNode.isStatic())) {
+				continue;
+			}
 			if (isEnum && methodNode.isSynthetic()) {
 				// skip synthetic methods in enums
 				continue;
@@ -1324,8 +1334,8 @@ public class GroovyCompilationUnitDeclaration extends CompilationUnitDeclaration
 		}
 	}
 
-	private void configureSuperClass(TypeDeclaration typeDeclaration, ClassNode superclass, boolean isEnum) {
-		if (isEnum && superclass.getName().equals("java.lang.Enum")) {
+	private void configureSuperClass(TypeDeclaration typeDeclaration, ClassNode superclass, boolean isEnum, boolean isTrait) {
+		if ((isEnum && superclass.getName().equals("java.lang.Enum")) || isTrait) {
 			// Don't wire it in, JDT will do it
 			typeDeclaration.superclass = null;
 		} else {
