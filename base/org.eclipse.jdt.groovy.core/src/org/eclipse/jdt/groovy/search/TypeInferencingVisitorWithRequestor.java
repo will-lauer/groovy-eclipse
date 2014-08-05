@@ -10,6 +10,7 @@
  *******************************************************************************/
 package org.eclipse.jdt.groovy.search;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -81,8 +82,10 @@ import org.codehaus.groovy.ast.stmt.ForStatement;
 import org.codehaus.groovy.ast.stmt.ReturnStatement;
 import org.codehaus.groovy.ast.stmt.Statement;
 import org.codehaus.groovy.classgen.BytecodeExpression;
+import org.codehaus.groovy.control.CompilerConfiguration;
 import org.codehaus.groovy.control.SourceUnit;
 import org.codehaus.groovy.syntax.Types;
+import org.codehaus.groovy.transform.stc.StaticTypeCheckingVisitor;
 import org.codehaus.jdt.groovy.internal.compiler.ast.JDTResolver;
 import org.codehaus.jdt.groovy.model.GroovyCompilationUnit;
 import org.codehaus.jdt.groovy.model.ModuleNodeMapper.ModuleNodeInfo;
@@ -293,6 +296,9 @@ public class TypeInferencingVisitorWithRequestor extends ClassCodeVisitorSupport
 	private final JDTResolver resolver;
 
 	private final AssignmentStorer assignmentStorer = new AssignmentStorer();
+
+	private ClassNode inferredStaticMethodType;
+	private boolean needToFixStaticMethodType;
 
 	/**
 	 * Use factory to instantiate
@@ -570,6 +576,8 @@ public class TypeInferencingVisitorWithRequestor extends ClassCodeVisitorSupport
 		} catch (JavaModelException e) {
 			Util.log(e, "Exception visiting method " + method.getElementName() + " in class " //$NON-NLS-1$ //$NON-NLS-2$
 					+ method.getParent().getElementName());
+		} catch (Exception e) {
+			Util.log(e);
 		} finally {
 			enclosingElement = oldEnclosing;
 			enclosingDeclarationNode = oldEnclosingNode;
@@ -972,6 +980,10 @@ public class TypeInferencingVisitorWithRequestor extends ClassCodeVisitorSupport
 
 	@Override
 	public void visitBinaryExpression(BinaryExpression node) {
+		if (node.getOperation().getType() == Types.KEYWORD_INSTANCEOF && node.getLeftExpression() instanceof VariableExpression) {
+			VariableExpression variable = (VariableExpression) node.getLeftExpression();
+			scopes.peek().addVariable(variable.getName(), node.getRightExpression().getType(), variable.getDeclaringClass());
+		}
 		if (isDependentExpression(node)) {
 			primaryTypeStack.pop();
 		}
@@ -1361,20 +1373,22 @@ public class TypeInferencingVisitorWithRequestor extends ClassCodeVisitorSupport
 			return;
 		}
 		ClassNode closureType = closureTypes.peek().get(node);
-		// Try to find single abstract method with single parameter
-		MethodNode method = null;
-		for (MethodNode methodNode : closureType.getMethods()) {
-			if (methodNode.isAbstract() && methodNode.getParameters().length == 1) {
-				if (method != null) {
-					return;
-				} else {
-					method = methodNode;
+		if (closureType != null) {
+			// Try to find single abstract method with single parameter
+			MethodNode method = null;
+			for (MethodNode methodNode : closureType.getMethods()) {
+				if (methodNode.isAbstract() && methodNode.getParameters().length == 1) {
+					if (method != null) {
+						return;
+					} else {
+						method = methodNode;
+					}
 				}
 			}
-		}
-		if (method != null) {
-			ClassNode inferredType = method.getParameters()[0].getType();
-			scope.addVariable("it", inferredType, VariableScope.OBJECT_CLASS_NODE);
+			if (method != null) {
+				ClassNode inferredType = method.getParameters()[0].getType();
+				scope.addVariable("it", inferredType, VariableScope.OBJECT_CLASS_NODE);
+			}
 		}
 	}
 
@@ -1643,8 +1657,34 @@ public class TypeInferencingVisitorWithRequestor extends ClassCodeVisitorSupport
 		if (node.isSpreadSafe()) {
 			exprType = createParameterizedList(exprType);
 		}
+		// Check if it is generic method
+		if (t.declaration instanceof MethodNode) {
+			MethodNode methodNode = (MethodNode) t.declaration;
+			boolean generic = methodNode.getReturnType().isGenericsPlaceHolder();
+			GenericsType[] genericsTypes = methodNode.getGenericsTypes();
+			if (generic && genericsTypes != null && genericsTypes.length > 0) {
+				exprType = inferGenericMethodType(methodNode, node.getArguments());
+				if (needToFixStaticMethodType) {
+					inferredStaticMethodType = exprType;
+				}
+			}
+		}
 		handleCompleteExpression(node, exprType, t.declaringType);
 		scopes.peek().forgetCurrentNode();
+	}
+
+	private ClassNode inferGenericMethodType(final MethodNode methodNode, Expression arguments) {
+		// Actually helper is not used as visitor. It is just reuses method inference implemented in the visitor.
+		class Helper extends StaticTypeCheckingVisitor {
+			public Helper() {
+				super(new SourceUnit(new File("."), new CompilerConfiguration(), null, null), methodNode.getDeclaringClass());
+			}
+
+			public ClassNode inferMethodType(ClassNode receiver, MethodNode method, Expression arguments) {
+				return inferReturnTypeGenerics(receiver, method, arguments);
+			}
+		}
+		return new Helper().inferMethodType(methodNode.getDeclaringClass(), methodNode, arguments);
 	}
 
 	@Override
@@ -1789,7 +1829,18 @@ public class TypeInferencingVisitorWithRequestor extends ClassCodeVisitorSupport
 
 	@Override
 	public void visitStaticMethodCallExpression(StaticMethodCallExpression node) {
+		if (isPrimaryExpression(node)) {
+			needToFixStaticMethodType = true;
+			visitMethodCallExpression(new MethodCallExpression(new ClassExpression(node.getOwnerType()), node.getMethod(),
+					node.getArguments()));
+			needToFixStaticMethodType = false;
+		}
 		boolean shouldContinue = handleSimpleExpression(node);
+		if (inferredStaticMethodType != null) {
+			primaryTypeStack.pop();
+			primaryTypeStack.push(inferredStaticMethodType);
+			inferredStaticMethodType = null;
+		}
 		if (shouldContinue && node.getEnd() > 0) {
 			visitClassReference(node.getOwnerType());
 			super.visitStaticMethodCallExpression(node);
